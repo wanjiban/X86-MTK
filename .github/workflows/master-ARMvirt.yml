@@ -1,6 +1,14 @@
-### 基于你提供的 `master-X86` 工作流，以下是为 `armvirt-armv8` 架构定制的版本：
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# Description: Build OpenWrt using GitHub Actions
+#
 
-name: master-ARMvirt
+name: master-armvirt-armv8
 
 permissions: write-all
 
@@ -42,14 +50,18 @@ jobs:
         sudo timedatectl set-timezone "$TZ"
         docker image prune -a -f
         docker container prune -f
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
+        sudo mkdir -p /mnt/workdir
+        sudo chown $USER:$GROUPS /mnt/workdir
+
+    - name: 检查空间使用情况1
+      if: (!cancelled())
+      run: df -hT
 
     - name: 克隆源码
-      working-directory: /workdir
+      working-directory: /mnt/workdir
       run: |
         git clone $REPO_URL --depth 1 -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        ln -sf /mnt/workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
     - name: 安装 feeds
       run: |
@@ -62,9 +74,6 @@ jobs:
         [ -d files ] && mv files openwrt/files || echo "files not found"
         [ -f $CONFIG_FILE ] && cat $CONFIG_FILE >> openwrt/.config
         cd openwrt
-        echo "CONFIG_TARGET_armvirt=y" >> .config
-        echo "CONFIG_TARGET_armvirt_64=y" >> .config
-        make defconfig
         chmod +x $GITHUB_WORKSPACE/$SETTINGS_SH && $GITHUB_WORKSPACE/$SETTINGS_SH
         chmod +x $GITHUB_WORKSPACE/$PACKAGES_SH && $GITHUB_WORKSPACE/$PACKAGES_SH
         chmod +x $GITHUB_WORKSPACE/$CLASH_CORE_SH && $GITHUB_WORKSPACE/$CLASH_CORE_SH
@@ -74,87 +83,150 @@ jobs:
         cd openwrt
         make defconfig
         make download -j8 V=10
+        find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+
+    - name: 空间使用情况2
+      if: (!cancelled())
+      run: df -hT
 
     - name: 编译工具链
       id: mtools
       run: |
         cd openwrt
         make defconfig
+        echo -e "$(($(nproc)+1)) thread compile"
         make tools/compile -j$(($(nproc)+1)) || make tools/compile -j1 V=s
         make toolchain/compile -j$(($(nproc)+1)) || make toolchain/compile -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 清除工具链编译中间产物
-      if: steps.mtools.outputs.status == 'success'
+    - name: 空间使用情况3_1
+      if: (!cancelled())
+      run: df -hT
+
+    - name: 清除工具链编译中间产物...
+      if: steps.mtools.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt
-        rm -rf dl/* build_dir/host/* build_dir/toolchain-*
+        rm -rf dl/*
+        rm -rf build_dir/host/*
+        rm -rf build_dir/toolchain-*
+
+    - name: 空间使用情况3_2
+      if: (!cancelled())
+      run: df -hT
 
     - name: 编译内核
       id: mkernel
-      if: steps.mtools.outputs.status == 'success'
+      if: steps.mtools.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt
+        echo -e "$(($(nproc)+1)) thread compile"
         make target/linux/compile -j$(($(nproc)+1)) || make target/linux/compile -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
+    - name: 空间使用情况4
+      if: (!cancelled())
+      run: df -hT
+
     - name: 编译插件
       id: mpackage
-      if: steps.mkernel.outputs.status == 'success'
+      if: steps.mkernel.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt
+        echo -e "$(($(nproc)+1)) thread compile"
         make package/compile -j$(($(nproc)+1)) || make package/compile -j1 V=s
         make package/index
         make package/install -j$(nproc) || make package/install -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
+    - name: 空间使用情况5
+      if: (!cancelled())
+      run: df -hT
+
     - name: 清除插件编译文件
       id: cpackage
-      if: steps.mpackage.outputs.status == 'success'
+      if: steps.mpackage.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt
         rm -rf build_dir/target-*/host
         echo "status=success" >> $GITHUB_OUTPUT
 
+    - name: 空间使用情况6
+      if: (!cancelled())
+      run: df -hT
+
     - name: 编译固件
       id: compile
-      if: steps.cpackage.outputs.status == 'success'
+      if: steps.cpackage.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt
+        echo -e "$(($(nproc)+1)) thread compile"
         make target/install -j$(nproc) || make target/install -j1 V=s
         make json_overview_image_info
         make checksum
         echo "status=success" >> $GITHUB_OUTPUT
 
+    - name: 空间使用情况7
+      if: (!cancelled())
+      run: df -hT
+
+    - name: 上传 bin 目录
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin_armvirt_armv8_${{ env.FILE_DATE }}
+        path: openwrt/bin
+
     - name: 整理文件
       id: organize
-      if: steps.compile.outputs.status == 'success'
+      if: steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
-        rm -rf *.buildinfo *.json *.manifest packages *.bin
+        rm -rf *.bin
+        rm -rf *.buildinfo
+        rm -rf *.json
+        rm -rf *.manifest
+        rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传固件目录
+      uses: actions/upload-artifact@main
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware_armvirt_armv8_${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 生成发布标签
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        VERSION1="${REPO_BRANCH}"
+        echo -e "🎉 ARMvirt ARMv8 平台\n✅ ${VERSION1} 源码\n❗️ ip地址 : 192.168.8.1" >> release.txt
+        echo "release_tag=$(date +\"%Y.%m.%d-${VERSION1}_ARMvirt-armv8\")" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: 上传固件到发布
       uses: softprops/action-gh-release@v2.0.4
-      if: steps.organize.outputs.status == 'success'
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.run_number }}-armvirt-armv8
-        body: 固件已编译完成，适用于 arm64 平台
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    - name: 删除旧发布
+    - name: 删除以前发布的固件
       uses: dev-drprasad/delete-older-releases@v0.3.3
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 15
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: 删除旧的构建记录
+    - name: 删除以前的工作流程
       uses: Mattraks/delete-workflow-runs@v2
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
